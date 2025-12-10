@@ -1,0 +1,3 @@
+email
+
+This email is for the task updation in the last 2 days. I have been focusing on learning new tools and exploring more libraries in LangGraph. I have also started working on creating a simple game and have added the task of integrating an agent to my to-do list.
