@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@langchain/core": "^1.1.4",
+    "@langchain/langgraph": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
