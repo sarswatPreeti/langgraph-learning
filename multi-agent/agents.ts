@@ -19,45 +19,110 @@ export class studentAgent{
     }
 }
 
-export class teacherAgent{
-    evaluate(suggestion: any){
+export class teacherAgent {
+    evaluate(suggestion: any) {
         const text = suggestion.suggestions.toLowerCase();
-        if(text.includes("cancel homework") || text.includes("unknown")){
-            return {
-                role: 'teacher',
-                action: "ask_student_for_revision",
-                message: "This suggestion is not feasible."
+        let score = 0;
 
-            };
+        // High learning benefit
+        if (
+            text.includes("study") ||
+            text.includes("learn") ||
+            text.includes("focus") ||
+            text.includes("schedule") ||
+            text.includes("flashcards")
+        ) {
+            score += 2;
         }
 
-        else{
+        // Creativity & collaboration (science fair, group activities)
+        if (
+            text.includes("science fair") ||
+            text.includes("group") ||
+            text.includes("collaboration")
+        ) {
+            score += 1;
+        }
+
+        // Discipline or unrealistic ideas
+        if (text.includes("cancel") || text.includes("no homework")) {
+            score -= 2;
+        }
+        if (text.includes("11am")) {
+            score -= 1;
+        }
+
+        // Neutral items (sports ground is neutral for teachers)
+        // score stays unchanged
+
+        if (score < 0) {
             return {
-                role: 'teacher',
+                role: "teacher",
+                action: "ask_student_for_revision",
+                message: "Please revise the idea. It may not support learning properly.",
+                score
+            };
+        } else {
+            return {
+                role: "teacher",
                 action: "send_to_principal",
-                message: "This is a good suggestion. Let's consider implementing it."
+                message: "The idea seems reasonable. Forwarding to principal.",
+                score
             };
         }
     }
 }
 
-export class principalAgent{
-    finalDecision(suggestion: any){
+export class principalAgent {
+    finalDecision(suggestion: any) {
         const text = suggestion.suggestions.toLowerCase();
+        let score = 0;
 
-        if(text.includes("science fair") || text.includes("sports ground")){
-            return {
-                role: 'principal',
-                action: "approve_suggestion",
-                message: "The suggestion has been approved for implementation."
-            };
+        // Very good, low-cost academic improvements
+        if (
+            text.includes("schedule") ||
+            text.includes("flashcards") ||
+            text.includes("online resources") ||
+            text.includes("study") ||
+            text.includes("focus")
+        ) {
+            score += 3;
         }
 
-        else{
+        // Science fair: good for reputation + moderate money
+        if (text.includes("science fair")) {
+            score += 1;   // good for school branding
+            score -= 1;   // cost & planning
+        }
+
+        // Sports ground: high cost project
+        if (text.includes("sports ground")) {
+            score -= 2;   // expensive
+        }
+
+        // Homework cancellation → breaks policy
+        if (text.includes("cancel homework")) {
+            score -= 3;
+        }
+
+        // Unrealistic request
+        if (text.includes("11am")) {
+            score -= 2;
+        }
+
+        if (score >= 1) {
             return {
-                role: 'principal',
+                role: "principal",
+                action: "approve_suggestion",
+                message: "Approved. This idea is beneficial and feasible.",
+                score
+            };
+        } else {
+            return {
+                role: "principal",
                 action: "reject_suggestion",
-                message: "The suggestion has been rejected."
+                message: "Rejected. This idea is not practical within school policies or budget.",
+                score
             };
         }
     }
