@@ -13,16 +13,10 @@ interface GraphState{
 }
 
 const studentNode= (state: GraphState) => {
-    const attempts = state.attempts ?? 0;
-    if (attempts >= 10) { // stop after 10 retries
-        return { ...state, attempts, teacherDecision: { action: "force_stop", message: "Max attempts reached" } };
-    }
-
     const newSuggestion = student.generateIdeas();
     return {
         ...state,
         suggestion: newSuggestion,
-        attempts: attempts + 1
     };
 };
 
@@ -43,6 +37,15 @@ const principalNode = (state: GraphState) => {
 };
 
 const teacherRouter = (state: GraphState) => {
+
+    const attempts = (state.attempts ?? 0) + 1;
+
+    if (attempts >= 8) {
+        return END;
+    }
+
+    state.attempts = attempts;
+
     const action = state.teacherDecision?.action;
     if(action === "send_to_principal"){
         return 'principalNode';
@@ -51,15 +54,21 @@ const teacherRouter = (state: GraphState) => {
     if(action === "ask_student_for_revision"){
         return 'studentNode';
     }
-
-    if(action === "force_stop"){
-        return END;
-    }
     return END;
 
 };
 
 const principalRouter = (state: GraphState) => {
+
+    const attempts = (state.attempts ?? 0) + 1;
+
+    if (attempts >= 8) {
+        return END;
+    }
+
+    state.attempts = attempts;
+    console.log(attempts);
+
     const action = state.principalDecision?.action;
     if(action ==="approve_suggestion") return END;
     if(action ==="reject_suggestion") return 'studentNode';
@@ -84,9 +93,11 @@ const workflowGraph = new StateGraph<GraphState>({
 .compile();
 
 (async () => {
-  const result = await workflowGraph.invoke({
+  const result = await workflowGraph.stream({
     suggestion: null
   });
 
-  console.log("Final Result → ", result);
+  for await (const step of result) {
+    console.log("STEP →", step);
+}
 })();
