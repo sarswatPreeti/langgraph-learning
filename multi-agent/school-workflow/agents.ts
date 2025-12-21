@@ -19,8 +19,10 @@ const model = new ChatOpenAI({
     },
     temperature: 0,
 });
+
 // ================= STUDENT AGENT =================
 export class StudentAgent {
+    
     async generateIdea(messages: Array<{role: string; content: string}> = []) {
         const history = messages.length > 0 
             ? "\n\nPrevious conversation:\n" + messages.map(m => `${m.role}: ${m.content}`).join("\n")
@@ -76,7 +78,7 @@ Return JSON only:
 }
 
 // ================= TEACHER AGENT =================
-export class TeacherAgent {
+export class TeacherAgent {    
     async review(idea: string, messages: Array<{role: string; content: string}> = []) {
         const history = messages.length > 0 
             ? "\n\nPrevious conversation:\n" + messages.map(m => `${m.role}: ${m.content}`).join("\n")
@@ -146,13 +148,15 @@ Return JSON only:
 
 // ================= SUPERVISOR AGENT =================
 export class SupervisorAgent {
-    act(state: any) {
+    
+    async act(state: any) {
         const teacher = state.teacherAssessment ?? "NA";
         const principal = state.principalFeasibility ?? "NA";
+        const decision = `${teacher}_${principal}`;
 
         return {
             ...state,
-            decision: `${teacher}_${principal}`
+            decision: decision
         };
     }
 }
