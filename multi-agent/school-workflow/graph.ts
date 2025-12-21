@@ -1,7 +1,5 @@
-import { StateGraph, START, END } from "@langchain/langgraph";
-import * as fs from "fs";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
     StudentAgent,
     TeacherAgent,
@@ -9,68 +7,66 @@ import {
     SupervisorAgent
 } from "./agents";
 
-// Get __dirname equivalent in ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 // ============ AGENT INSTANCES ============
 const student = new StudentAgent();
 const teacher = new TeacherAgent();
 const principal = new PrincipalAgent();
 const supervisor = new SupervisorAgent();
 
-// ============ PERSISTENT HISTORY ============
-const HISTORY_FILE = path.join(__dirname, "chat_history.json");
-
-interface HistoryEntry {
-    timestamp: string;
-    messages: Array<{role: string; content: string}>;
+// ============ GRAPH STATE WITH ANNOTATION ============
+interface Message {
+    role: string;
+    content: string;
 }
 
-function loadHistory(): HistoryEntry[] {
-    try {
-        if (fs.existsSync(HISTORY_FILE)) {
-            const data = fs.readFileSync(HISTORY_FILE, "utf-8");
-            return JSON.parse(data);
-        }
-    } catch (error) {
-        console.error("Error loading history:", error);
-    }
-    return [];
-}
+// Define state using LangGraph Annotation for proper state management
+const GraphState = Annotation.Root({
+    idea: Annotation<string | undefined>({
+        reducer: (_, next) => next,
+        default: () => undefined,
+    }),
+    teacherAssessment: Annotation<string | undefined>({
+        reducer: (_, next) => next,
+        default: () => undefined,
+    }),
+    principalFeasibility: Annotation<string | undefined>({
+        reducer: (_, next) => next,
+        default: () => undefined,
+    }),
+    decision: Annotation<string | undefined>({
+        reducer: (_, next) => next,
+        default: () => undefined,
+    }),
+    messages: Annotation<Message[]>({
+        reducer: (prev, next) => next, // Replace messages entirely
+        default: () => [],
+    }),
+    attempts: Annotation<number>({
+        reducer: (_, next) => next,
+        default: () => 0,
+    }),
+});
 
-function saveHistory(messages: Array<{role: string; content: string}>) {
-    try {
-        const history = loadHistory();
-        history.push({
-            timestamp: new Date().toISOString(),
-            messages
-        });
-        fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
-    } catch (error) {
-        console.error("Error saving history:", error);
-    }
-}
+type GraphStateType = typeof GraphState.State;
 
-// ============ GRAPH STATE ============
-interface GraphState {
-    idea?: string;
-    teacherAssessment?: string;
-    principalFeasibility?: string;
-    decision?: string;
-    messages?: Array<{role: string; content: string}>;
-    attempts?: number;
+// ============ POSTGRES CHECKPOINTER FOR DURABLE PERSISTENCE ============
+const connectionString = "postgresql://postgres:preetiDatabase@localhost:5432/school_agents";
+
+async function createCheckpointer() {
+    const checkpointer = PostgresSaver.fromConnString(connectionString);
+    await checkpointer.setup(); // Creates necessary tables if they don't exist
+    return checkpointer;
 }
 
 // ============ NODES ============
-const studentNode = async (state: GraphState) => {
+const studentNode = async (state: GraphStateType) => {
     const messages = state.messages || [];
     const attempts = (state.attempts || 0) + 1;
     
     // Stop after 3 attempts
     if (attempts > 3) {
         console.log("\n⚠️  Max attempts reached (3). Ending workflow.\n");
-        return { ...state, attempts };
+        return { attempts };
     }
     
     const res = await student.generateIdea(messages);
@@ -85,30 +81,30 @@ const studentNode = async (state: GraphState) => {
     };
 };
 
-const teacherNode = async (state: GraphState) => {
+const teacherNode = async (state: GraphStateType) => {
     const messages = state.messages || [];
     const res = await teacher.review(state.idea!, messages);
     const newMessage = { role: "teacher", content: `Assessment: ${res.assessment}` };
-    return { ...state, teacherAssessment: res.assessment, messages: [...messages, newMessage] };
+    return { teacherAssessment: res.assessment, messages: [...messages, newMessage] };
 };
 
-const principalNode = async (state: GraphState) => {
+const principalNode = async (state: GraphStateType) => {
     const messages = state.messages || [];
     const res = await principal.review(state.idea!, messages);
     const newMessage = { role: "principal", content: `Feasibility: ${res.feasibility}` };
-    return { ...state, principalFeasibility: res.feasibility, messages: [...messages, newMessage] };
+    return { principalFeasibility: res.feasibility, messages: [...messages, newMessage] };
 };
 
-const supervisorNode = (state: GraphState) => {
+const supervisorNode = async (state: GraphStateType) => {
   // Check if max attempts reached
   if (state.attempts && state.attempts > 3) {
-    return { ...state, decision: END };
+    return { decision: END };
   }
-  return supervisor.act(state);
+  return await supervisor.act(state);
 };
 
 // ============ ROUTER (NO LOGIC) ============
-const supervisorRouter = (state: GraphState) => {
+const supervisorRouter = (state: GraphStateType) => {
     // If max attempts reached, end workflow
     if (state.attempts && state.attempts > 3) {
         return "END";
@@ -121,16 +117,7 @@ const supervisorRouter = (state: GraphState) => {
 };
 
 // ============ GRAPH ============
-const workflow = new StateGraph<GraphState>({
-    channels: {
-        idea: null,
-        teacherAssessment: null,
-        principalFeasibility: null,
-        decision: null,
-        messages: null,
-        attempts: null,
-    },
-})
+const workflow = new StateGraph(GraphState)
     .addNode("student", studentNode, { ends: ["supervisor"] })
     .addNode("teacher", teacherNode, { ends: ["supervisor"] })
     .addNode("principal", principalNode, { ends: ["supervisor"] })
@@ -148,51 +135,67 @@ const workflow = new StateGraph<GraphState>({
         "acceptable_feasible": END,
         "acceptable_not_feasible": "student",
         "END": END,
-    })
-
-    .compile();
+    });
 
 // ============ RUN ============
 (async () => {
-    const stream = await workflow.stream({}, { recursionLimit: 50 });
-    let finalState: any = null;
+    // Initialize PostgreSQL checkpointer
+    const checkpointer = await createCheckpointer();
+    
+    // Compile the workflow with the checkpointer
+    const compiledWorkflow = workflow.compile({ checkpointer });
+    
+    // Use a thread_id to enable state persistence via checkpointer
+    // Same thread_id will resume from last checkpoint, new thread_id starts fresh
+    const threadId = `school-workflow-${Date.now()}`;
+    
+    const config = {
+        configurable: { thread_id: threadId },
+        recursionLimit: 50,
+    };
+
+    console.log(`\n🚀 Starting workflow with thread_id: ${threadId}\n`);
+    console.log(`📦 Using PostgreSQL for durable state persistence\n`);
+
+    const stream = await compiledWorkflow.stream({}, config);
+    let finalState: GraphStateType | null = null;
 
     for await (const step of stream) {
         console.log("STEP →", step);
         
         // Keep track of the last state
         const firstKey = Object.keys(step)[0];
-        finalState = step[firstKey as keyof typeof step];
+        finalState = step[firstKey as keyof typeof step] as GraphStateType;
     }
     
-    // Save current run's messages to persistent history
-    if (finalState?.messages) {
-        saveHistory(finalState.messages);
-    }
+    // Display final state summary
+    console.log("\n" + "=".repeat(60));
+    console.log("📋 FINAL STATE (Persisted via Checkpointer):");
+    console.log("=".repeat(60));
+    console.log(`Thread ID: ${threadId}`);
+    console.log(`Final Idea: ${finalState?.idea || "None"}`);
+    console.log(`Teacher Assessment: ${finalState?.teacherAssessment || "N/A"}`);
+    console.log(`Principal Feasibility: ${finalState?.principalFeasibility || "N/A"}`);
+    console.log(`Decision: ${finalState?.decision || "N/A"}`);
+    console.log(`Attempts: ${finalState?.attempts || 0}`);
     
-    // Load and display only the latest 5 historical messages
-    const allHistory = loadHistory();
-    
-    if (allHistory.length > 0) {
-        console.log("\n" + "=".repeat(60));
-        console.log("📜 RECENT MESSAGE HISTORY (Latest 5 Runs):");
-        console.log("=".repeat(60));
-        
-        // Get only the last 5 entries
-        const recentHistory = allHistory.slice(-5);
-        const startIndex = Math.max(0, allHistory.length - 5);
-        
-        recentHistory.forEach((entry, index) => {
-            const date = new Date(entry.timestamp).toLocaleString();
-            console.log(`\n🕒 Run ${startIndex + index + 1} - ${date}`);
-            console.log("-".repeat(60));
-            entry.messages.forEach((msg: any) => {
-                console.log(`  ${msg.role.toUpperCase()}: ${msg.content}`);
-            });
+    if (finalState?.messages && finalState.messages.length > 0) {
+        console.log("\n📜 Message History:");
+        console.log("-".repeat(60));
+        finalState.messages.forEach((msg) => {
+            console.log(`  ${msg.role.toUpperCase()}: ${msg.content}`);
         });
-        
-        console.log("\n" + "=".repeat(60));
-        console.log(`💾 Total runs saved in file: ${allHistory.length}`);
-        console.log("=".repeat(60) + "\n");
     }
+    
+    console.log("\n" + "=".repeat(60));
+    console.log("💾 State persisted via PostgreSQL checkpointer");
+    console.log("   Use the same thread_id to resume this workflow");
+    console.log("=".repeat(60) + "\n");
+    
+    // Example: Get the current state from checkpointer
+    const savedState = await compiledWorkflow.getState(config);
+    console.log("🔍 Retrieved state from checkpointer:", savedState.values);
+    
+    // Close the database connection
+    await checkpointer.end();
 })();
